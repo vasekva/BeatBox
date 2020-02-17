@@ -1,30 +1,57 @@
 import javax.sound.midi.*;
 import javax.swing.*;
+import javax.swing.event.ListSelectionEvent;
+import javax.swing.event.ListSelectionListener;
 import java.awt.*;
 import java.awt.event.ActionEvent;
 import java.awt.event.ActionListener;
-import java.util.ArrayList;
+import java.io.*;
+import java.net.Socket;
+import java.util.*;
+
+
 
 public class BeatBox {
 
+    JFrame theFrame;
     JPanel mainPanel;
-    ArrayList<JCheckBox> checkboxList; // список флажков
+    JList incomingList;
+    JTextField userMessage;
+    ArrayList<JCheckBox> checkboxList;// список флажков
+    int nextNum;
+    String userName;
+    Vector<String> listVector = new Vector<>();
+    ObjectOutputStream out;
+    ObjectInputStream in;
+    HashMap<String, boolean[]> otherSeqsMap = new HashMap<>();
+
     Sequencer sequencer;
     Sequence sequence;
+    Sequence mySequence = null;
     Track track;
-    JFrame theFrame;
 
     String[] instrumentNames = { "Bass Drum", "Closed Hi-Hat", "Open Hi-Hat", "Acoustic Snare",
             "Crash Cymbal", "Hand Clap", "High Tom", "Hi Bongo", "Maracas", "Whistle", "Low Conga",
             "Cowbell", "Vibraslap", "Low-mid Tom", "High Agogo", "Open Hi Conga" };
     int[] instruments = {35, 42, 46, 38, 49, 39, 50, 60, 70, 72, 64, 56, 58, 47, 67, 63};
-    /*
-     * ^ Эти числа - фактические барабанные клавиши. Канал барабана - это что-то вроде фортепиано, только каждая
-     * клавиша на нем - отдельный барабан. Номер 35 - клавиша для Bass drum, а 42 - Closed Hi-Hat и т.д
-     */
 
     public static void main (String[] args) {
-        new BeatBox().buildGUI();
+        new BeatBox().startUp("Hi");
+    }
+
+    public void startUp(String name) {
+        userName = name;
+        try {
+            Socket sock = new Socket("127.0.0.1", 4242);
+            out = new ObjectOutputStream(sock.getOutputStream());
+            in = new ObjectInputStream(sock.getInputStream());
+            Thread remote = new Thread(new RemoteReader());
+            remote.start();
+        } catch (Exception e) {
+            System.out.println("couldn't connect - you'll have to play alone.");
+        }
+        setUpMidi();
+        buildGUI();
     }
 
     public void buildGUI() {
@@ -36,8 +63,8 @@ public class BeatBox {
         // ^ Пустая граница позволяет создать поля между краями панели и местами размещений компонентов
 
         checkboxList = new ArrayList<JCheckBox>();
-        Box buttonBox = new Box(BoxLayout.Y_AXIS);
 
+        Box buttonBox = new Box(BoxLayout.Y_AXIS);
         JButton start = new JButton("Start");
         start.addActionListener(new MyStartListener());
         buttonBox.add(start);
@@ -54,6 +81,20 @@ public class BeatBox {
         downTempo.addActionListener(new MyDownTempoListener());
         buttonBox.add(downTempo);
 
+        JButton sendIt = new JButton("sendIt");
+        sendIt.addActionListener(new MySendListener());
+        buttonBox.add(sendIt);
+
+        userMessage = new JTextField();
+        buttonBox.add(userMessage);
+
+        incomingList = new JList();
+        incomingList.addListSelectionListener(new MyListSelectionListener());
+        incomingList.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        JScrollPane theList = new JScrollPane(incomingList);
+        buttonBox.add(theList);
+        incomingList.setListData(listVector);
+
         Box nameBox = new Box(BoxLayout.Y_AXIS);
         for(int i = 0; i < 16; i++) {
             nameBox.add(new Label(instrumentNames[i]));
@@ -63,16 +104,14 @@ public class BeatBox {
         background.add(BorderLayout.WEST, nameBox);
 
         theFrame.getContentPane().add(background);
-
         GridLayout grid = new GridLayout(16, 16);
         grid.setVgap(1);
         grid.setHgap(2);
         mainPanel = new JPanel(grid);
         background.add(BorderLayout.CENTER, mainPanel);
 
-        /* Создаем флажки,присваиваем им значения false(чтобы они не были установлены),
-         * а затем добавляем их в массив ArrayList и на панель
-         */
+
+        //flags adding
         for (int i = 0; i < 256; i++) {
             JCheckBox c = new JCheckBox();
             c.setSelected(false);
@@ -91,8 +130,8 @@ public class BeatBox {
         try {
             sequencer = MidiSystem.getSequencer();
             sequencer.open();
-            sequence = new Sequence(Sequence.PPQ, 4); // Стандартный MIDI-код для получения синтезатора,
-            track = sequence.createTrack();                     // секвенсора и дорожки.
+            sequence = new Sequence(Sequence.PPQ, 4); // We get object Sequencer and create sequence
+            track = sequence.createTrack();                     // and track
             sequencer.setTempoInBPM(120);
 
         } catch (Exception e) { e.printStackTrace(); }
@@ -101,15 +140,12 @@ public class BeatBox {
     public void buildTrackAndStart() {
         /* Создаем массив из 16 элементов,чтобы хранить значения для каждого инструмента
           на все 16 тактов */
-        int[] trackList = null;
-
+        ArrayList<Integer> trackList = null;
         sequence.deleteTrack(track);
         track = sequence.createTrack(); // Избавляемся от старой дорожки и создаем новую
 
         for (int i = 0; i < 16; i++) { // <- Делаем это для каждого из 16 рядов
-            trackList = new int[16];
-
-            int key = instruments[i]; // <- Задаем клавишу,которая представляет инструмент из заданного в начале массива
+            trackList = new ArrayList<>();
 
             /* Установлен ли влажок на этом такте? Если да,то помещаем значения клавиши в текущую ячейку массива
              * (ячейку,которая представляет такт). Если нет,то инструмент не должен играть в этом такте,поэтому
@@ -117,19 +153,16 @@ public class BeatBox {
             for(int j = 0; j < 16; j++) {
                 JCheckBox jc = (JCheckBox) checkboxList.get(j + (16 * i));
                 if (jc.isSelected()) {
-                    trackList[j] = key;
+                    int key = instruments[i];
+                    trackList.add(key);
                 } else {
-                    trackList[j] = 0;
+                    trackList.add(null);
                 }
             } //внутренний цикл
-
             makeTracks(trackList);
-            track.add(makeEvent(176, 1, 127, 0, 16));
         } //внешний цикл
-
         track.add(makeEvent(192, 9, 1, 0, 15));
         try {
-
             sequencer.setSequence(sequence);
             sequencer.setLoopCount(sequencer.LOOP_CONTINUOUSLY);
             sequencer.start();
@@ -164,18 +197,95 @@ public class BeatBox {
         }
     }
 
+    //Внутренний класс для сохранения схемы
+    public class MySendListener implements ActionListener {
+        public void actionPerformed(ActionEvent a) {
+            boolean[] checkboxState = new boolean[256];
+
+            for (int i = 0; i < 256; i++) {
+                JCheckBox check = (JCheckBox) checkboxList.get(i);
+                if (check.isSelected()) {
+                    checkboxState[i] = true;
+                }
+            }
+            String messageToSend = null;
+            try {
+                out.writeObject(userName + nextNum++ + ": " + userMessage.getText());
+                out.writeObject(checkboxState);
+            } catch(Exception e) {
+                System.out.println("Sorry dude. Couldn't send it to the server.");
+            }
+            userMessage.setText("");
+        }
+    }
+
+    public class MyListSelectionListener implements ListSelectionListener {
+        @Override
+        public void valueChanged(ListSelectionEvent e) {
+            if (!e.getValueIsAdjusting()) {
+                String selected = (String) incomingList.getSelectedValue();
+                if (selected != null) {
+                    boolean[] selectedState = (boolean[]) otherSeqsMap.get(selected);
+                    changeSequence(selectedState);
+                    sequencer.stop();
+                    buildTrackAndStart();
+                }
+            }
+        }
+    }
+
+    public class RemoteReader implements Runnable {
+        boolean[] checkboxState = null;
+        String nameToShow = null;
+        Object obj = null;
+        public void run() {
+            try {
+                while ((obj = in.readObject()) != null) {
+                    System.out.println("got an object from server");
+                    System.out.println(obj.getClass());
+                    nameToShow = (String) obj;
+                    checkboxState = (boolean[]) in.readObject();
+                    otherSeqsMap.put(nameToShow, checkboxState);
+                    listVector.add(nameToShow);
+                    incomingList.setListData(listVector);
+                }
+            } catch (Exception e) { e.printStackTrace();}
+        }
+    }
+
+    public class MyPlayMineListener implements ActionListener {
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            if (mySequence != null) {
+                sequence = mySequence;
+            }
+        }
+    }
+
+    public void changeSequence(boolean[] checkBoxState) {
+        for (int i = 0; i < 256; i++) {
+            JCheckBox check = (JCheckBox) checkboxList.get(i);
+            if (checkBoxState[i]) {
+                check.setSelected(true);
+            } else {
+                check.setSelected(false);
+            }
+        }
+    }
+
 
     /* Метод создает события для одного инструмента за каждый проход цикла для всех 16 тактов.
      *  Можно получить int[] для Bass drum, и каждый элемент массива будет содержать либо клавишу
      *  этого инструмента,либо ноль. Если это ноль, то инструмент не должен играть на текущем такте.
      *  Иначе нужно создать событие и добавить его в дорожку */
-    public void makeTracks(int[] list) {
+    public void makeTracks(ArrayList list) {
+        Iterator it = list.iterator();
         for (int i = 0; i < 16; i++) {
-            int key = list[i];
-
-            if (key != 0) {
-                track.add(makeEvent(144, 9, key, 100, i));
-                track.add(makeEvent(144, 9, key, 100, i+1));
+            Integer num = (Integer) it.next();
+            if (num != null) {
+                int numKey = num.intValue();
+                track.add(makeEvent(144, 9, numKey, 100, i));
+                track.add(makeEvent(144, 9, numKey, 100, i+1));
             }
         }
     }
